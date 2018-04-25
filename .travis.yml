@@ -18,7 +18,7 @@ install:
   - pip install coverage
   - pip install nose
   - pip install coveralls
-  - pip install -e git+https://github.com/Anyblok/anyblok_wms_base
+  - pip install -e git+https://github.com/Anyblok/anyblok_wms_base#egg=anyblok_wms_base
   - pip install -e .
 
 env:
