@@ -81,7 +81,7 @@ class WmsExamplesContinuousWorker:
                 logger.warning("%s: got keyboard interrupt, quitting",
                                self_str)
                 return
-            except:
+            except Exception:
                 logger.exception("%s: got exception in main loop", self_str)
                 self.registry.rollback()
             else:
@@ -178,9 +178,7 @@ class Regular:
             try:
                 proceed = self.process_one() is not None
                 self.registry.commit()
-            except KeyboardInterrupt:
-                raise
-            except:
+            except Exception:
                 self.registry.rollback()
                 logger.exception("%s, exception in process_one()", self_str)
 

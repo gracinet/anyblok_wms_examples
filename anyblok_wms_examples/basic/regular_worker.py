@@ -129,9 +129,7 @@ class Regular(Mixin.WmsBasicSellerUtil):
                 proceed = self.process_arrival()
                 c += 1
                 self.registry.commit()
-            except KeyboardInterrupt:
-                raise
-            except:
+            except Exception:
                 logger.exception("%s, exception in process_arrival()",
                                  self_str)
                 self.registry.rollback()
@@ -145,9 +143,7 @@ class Regular(Mixin.WmsBasicSellerUtil):
                 proceed = bool(self.purchase())
                 c += 1
                 self.registry.commit()
-            except KeyboardInterrupt:
-                raise
-            except:
+            except Exception:
                 logger.exception("%s, exception in purchase()",
                                  self_str)
                 self.registry.rollback()
