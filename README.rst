@@ -1,6 +1,15 @@
 Examples for Anyblok WMS
 ========================
 
+.. image:: https://travis-ci.org/AnyBlok/anyblok_wms_base.svg?branch=master
+    :target: https://travis-ci.org/AnyBlok/anyblok_wms_base
+    :alt: Build status
+
+.. image:: https://coveralls.io/repos/github/AnyBlok/anyblok_wms_base/badge.svg?branch=master
+    :target: https://coveralls.io/github/AnyBlok/anyblok_wms_base?branch=master
+    :alt: Coverage
+
+
 License
 ~~~~~~~
 
