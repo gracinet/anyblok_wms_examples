@@ -9,4 +9,4 @@
 
 
 def init_config(**kw):
-    from .basic import config  # flake8: noqa
+    from .launcher import config  # flake8: noqa

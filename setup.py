@@ -36,6 +36,7 @@ setup(
             'wms-example-launcher=anyblok_wms_examples.launcher:Launcher',
             'wms-example-basic-seller=anyblok_wms_examples.basic:Seller',
         ],
+        'anyblok.init':  'wms_examples=anyblok_wms_examples:init_config',
         'test_bloks': [
         ],
         'console_scripts': [

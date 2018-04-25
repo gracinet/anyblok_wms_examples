@@ -9,10 +9,11 @@
 import os
 import sys
 import anyblok
+from anyblok.config import Configuration
 import logging
 import time
+from cProfile import Profile
 from multiprocessing import Process
-from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 from sqlalchemy import func
 
 
@@ -21,10 +22,39 @@ logger = logging.getLogger('multi')
 DEFAULT_ISOLATION = 'REPEATABLE READ'  # 'SERIALIZABLE'
 
 
-def regular_worker(arguments):
-    registry = anyblok.start('basic', configuration_groups=[],
-                             loadwithoutmigration=True,
-                             isolation_level=DEFAULT_ISOLATION)
+def dump_profile(profile, path_template, wtype='regular'):
+    """Dump profile statistics in file
+
+    The final file path is derived from path_template, wtype and the pid
+    """
+    base_path, ext = os.path.splitext(path_template)
+    path = '%s_%s_%s' % (base_path, wtype, os.getpid()) + ext
+    try:
+        from pyprof2calltree import convert
+    except ImportError:
+        profile.dump_stats(path)
+    else:
+        convert(profile.getstats(), path + '.kgrind')
+
+
+def start_registry(isolation_level):
+    """Analog of anyblok.start(), with Configuration already loaded.
+
+    Calling ``anyblok.start()`` from a worker process while the main
+    process has already consumed command line arguments before forking
+    results in an empty configuration, which can't work at all
+    """
+
+    from anyblok.blok import BlokManager
+    from anyblok.registry import RegistryManager
+    BlokManager.load()
+    return RegistryManager.get(Configuration.get('db_name'),
+                               isolation_level=isolation_level,
+                               loadwithoutmigration=True)
+
+
+def regular_worker():
+    registry = start_registry(DEFAULT_ISOLATION)
     if registry is None:
         logging.critical("regular_worker: couldn't init registry")
         sys.exit(1)
@@ -35,7 +65,7 @@ def regular_worker(arguments):
     if previous_run_timeslice is None:
         previous_run_timeslice = 0
 
-    timeslices = arguments.timeslices
+    timeslices = Configuration.get('timeslices')
     process = Worker.insert(
         pid=os.getpid(),
         active=True,
@@ -43,6 +73,11 @@ def regular_worker(arguments):
         max_timeslice=previous_run_timeslice + timeslices,
         )
 
+    with_profile = Configuration.get('with_profile')
+
+    if with_profile:
+        profile = Profile()
+        profile.enable()
     for i in range(1, 1 + timeslices):
         registry.commit()
         try:
@@ -52,9 +87,12 @@ def regular_worker(arguments):
             break
         process.wait_others(i)
     registry.commit()
+    if with_profile:
+        profile.disable()
+        dump_profile(profile, Configuration.get('profile_file'))
 
 
-def continuous(wtype, arguments,
+def continuous(wtype,
                isolation_level=DEFAULT_ISOLATION, cleanup=False):
     """Start a continuous worker.
 
@@ -62,9 +100,7 @@ def continuous(wtype, arguments,
                          the same worker type. They are considered stale
                          from previous runs.
     """
-    registry = anyblok.start('basic', configuration_groups=[],
-                             loadwithoutmigration=True,
-                             isolation_level=DEFAULT_ISOLATION)
+    registry = start_registry(isolation_level)
     if registry is None:
         logging.critical("continuous worker(type=%s): couldn't init registry",
                          wtype)
@@ -83,51 +119,45 @@ def continuous(wtype, arguments,
         logger.info("Regular workers not yet running. Waiting a bit")
         time.sleep(0.1)
         registry.rollback()
-
+    with_profile = Configuration.get('with_profile')
+    if with_profile:
+        profile = Profile()
+        profile.enable()
     process.run()
+    if with_profile:
+        profile.disable()
+        dump_profile(profile, Configuration.get('profile_file'), wtype=wtype)
 
 
-def reserver(arguments):
-    return continuous('Reserver', arguments, cleanup=True)
+def reserver():
+    return continuous('Reserver', cleanup=True)
 
 
-def planner(number, arguments):
-    return continuous('Planner', arguments, cleanup=(number == 0))
-
-
-class Arguments:
-    pass
+def planner(number):
+    return continuous('Planner', cleanup=(number == 0))
 
 
 def run():
-    parser = ArgumentParser(
-        description="Run the application in pure batch mode",
-        formatter_class=ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--timeslices", type=int, default=10,
-                        help="Number of time slices to run")
-    parser.add_argument("--planner-workers", type=int, default=2,
-                        help="Number of planner worker processes to run")
-    parser.add_argument("--regular-workers", type=int, default=4,
-                        help="Number of regular worker processes to run. "
-                        "in a normal application, these would be the ones "
-                        "reacting to external events (bus, HTTP requests)")
+    anyblok.load_init_function_from_entry_points()
+    Configuration.load('wms-bench')
 
-    logging.basicConfig(level=logging.INFO)
-#    arguments = parser.parse_args()
-    arguments = Arguments()
-    arguments.regular_workers = 4
-    arguments.timeslices = 10
-    arguments.planner_workers = 2
+    regular = Configuration.get('regular_workers')
+    planners = Configuration.get('planner_workers')
+    print("Starting example/bench for {timeslices} time slices, "
+          "with {regular} regular workers and "
+          "{planners} planners\n\n".format(
+              regular=regular, planners=planners,
+              timeslices=Configuration.get('timeslices')))
 
     # starting regular workers right away, otherwise continuous workers
     # would believe the test/bench run is already finished.
-    for process in (Process(target=regular_worker, args=(arguments, ))
-                    for i in range(arguments.regular_workers)):
+    for process in (Process(target=regular_worker, args=())
+                    for i in range(regular)):
         process.start()
 
-    Process(target=reserver, args=(arguments, )).start()
+    Process(target=reserver, args=()).start()
 
-    planners = [Process(target=planner, args=(i, arguments, ))
-                for i in range(arguments.planner_workers)]
+    planners = [Process(target=planner, args=(i, ))
+                for i in range(planners)]
     for process in planners:
         process.start()
