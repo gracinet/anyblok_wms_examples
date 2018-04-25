@@ -1,0 +1,36 @@
+language: python
+sudo: false
+
+python:
+  - "3.6"
+
+virtualenv:
+  system_site_packages: false
+
+services:
+  - postgresql
+
+addons:
+  postgresql: "9.6"
+
+install:
+  - pip install flake8
+  - pip install coverage
+  - pip install nose
+  - pip install coveralls
+  - pip install -e git+https://github.com/Anyblok/anyblok_wms_base
+  - pip install -e .
+
+env:
+  global:
+    - ANYBLOK_DATABASE_NAME=travis_ci_test
+    - ANYBLOK_DATABASE_DRIVER=postgresql
+    - ANYBLOK_DATABASE_USER=postgres
+
+script:
+  - flake8 anyblok_wms_examples
+  - anyblok_createdb --install-bloks wms-example-basic-seller
+  - nosetests anyblok_wms_examples --with-doctest --with-anyblok-bloks -v -s --with-coverage --cover-package=anyblok_wms_examples
+
+after_success:
+  coveralls
