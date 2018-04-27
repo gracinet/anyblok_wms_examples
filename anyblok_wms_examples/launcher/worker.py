@@ -7,11 +7,8 @@
 # v. 2.0. If a copy of the MPL was not distributed with this file,You can
 # obtain one at http://mozilla.org/MPL/2.0/.
 import time
-import sys
 import random
-import os
 import logging
-import select
 from anyblok import Declarations
 from anyblok.column import Integer
 from anyblok.column import Boolean
@@ -46,16 +43,12 @@ class WmsExamplesContinuousWorker:
     def __repr__(self):
         return "%s(pid=%d)" % (self.__registry_name__, self.pid)
 
-    @classmethod
-    def should_proceed(cls):
-        """Return ``False`` iff all regular workers are finished."""
-        Regular = cls.registry.Wms.Worker.Regular
-        count = Regular.query().filter(Regular.active.is_(True)).count()
-        if count:
-            logger.debug("%s: There are still %d active regular workers. "
-                         "Proceeding further", cls.__registry_name__, count)
-            return True
-        return False
+    def should_proceed(self):
+        """Method telling if we must start over.
+
+        To be injected after instantiation.
+        """
+        raise NotImplementedError
 
     def maybe_sleep(self, prefix, something_done):
         """If nothing has been done, sleep for a while."""
@@ -87,8 +80,7 @@ class WmsExamplesContinuousWorker:
             else:
                 self.registry.commit()
                 self.maybe_sleep(self_str, something_done)
-        logger.info("%s: No more active regular worker. Stopping there.",
-                    self_str)
+        logger.warning("%s: Stopping there.", self_str)
 
 
 @register(Wms)
@@ -187,38 +179,3 @@ class Regular:
             self.active = False
         self.registry.commit()
         logger.info("%s, finished timeslice %d", self_str, tsl)
-        sys.stderr.flush()
-        self.registry.session.execute("NOTIFY timeslice_finished, '%d'" % tsl)
-        self.registry.commit()
-
-    def wait_others(self, timeslice):
-        self.registry.session.execute("LISTEN timeline_finished")
-        while 1:
-            self.registry.commit()
-            conn = self.registry.session.connection().connection
-            if select.select([conn], [], [], self.simulate_sleep) == (
-                    [], [], []):
-                logger.warning("Timeout in LISTEN")
-                if self.all_finished(timeslice):
-                    return
-            else:
-                conn.poll()
-                while conn.notifies:
-                    notify = conn.notifies.pop(0)
-                    logger.debug(
-                        "Process %d got end signal for process_id %d, "
-                        "timeslice %s", os.getpid(), notify.pid,
-                        notify.payload)
-                    if self.all_finished(timeslice):
-                        return
-
-    def all_finished(self, timeslice):
-        cls = self.__class__
-        query = cls.query().filter(
-            cls.done_timeslice < timeslice, cls.active.is_(True))
-        if query.count():
-            logger.info("%s: timeslice %d not done yet for %s",
-                        self,
-                        timeslice, [p.pid for p in query.all()])
-            return False
-        return True

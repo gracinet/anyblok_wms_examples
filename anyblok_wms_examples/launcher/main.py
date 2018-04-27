@@ -11,15 +11,43 @@ import sys
 import anyblok
 from anyblok.config import Configuration
 import logging
-import time
 from cProfile import Profile
 from multiprocessing import Process
+from multiprocessing import Event
+from multiprocessing import Queue
 from sqlalchemy import func
-
+from contextlib import contextmanager
 
 logger = logging.getLogger('multi')
 
 DEFAULT_ISOLATION = 'REPEATABLE READ'  # 'SERIALIZABLE'
+
+orch_workers_ready = Event()
+"""Acknowledgement by the orchestrator that all regular workers are ready.
+"""
+orch_timeslice_finished = Event()
+"""Event to tell regular workers that all of them have finished the timeslice.
+"""
+
+orch_timeslice_started = Event()
+"""Event to tell workers that the timeslice has started for all of them.
+
+This event is useful to know when to clear (reset)
+``orch_timeslice_finished`` and to avoid a fast worker to wait on it before
+it's been cleared.
+"""
+
+orch_stop_all = Event()
+"""Event sent by the orchestrator to make all processes stop."""
+
+workers_feedback = Queue()
+"""Queue for workers to notify orchestrator of their progress."""
+
+# message types
+REGULAR_READY = 0
+WORKER_TIMESLICE_START = 1
+WORKER_TIMESLICE_DONE = 2
+WORKER_FINISHED = 3
 
 
 def dump_profile(profile, path_template, wtype='regular'):
@@ -53,10 +81,92 @@ def start_registry(isolation_level):
                                loadwithoutmigration=True)
 
 
+def orchestrator():
+    """Processs to orchestrate regular workers in timeslices.
+
+    The current implementation uses events for each worker.
+    It doesn't matter in which order we wait for the workers events :
+    if one is triggered while we wait for another, the wait time of the first
+    will be zero. In other words, event waits are commutative.
+    """
+
+    logger = logging.getLogger(__name__ + '.orchestrator')
+    workers = {}
+
+    while len(workers) < Configuration.get('regular_workers'):
+        msg = workers_feedback.get()  # TODO timeout ?
+        if msg[0] != REGULAR_READY:
+            logger.warning("While waiting for workers to be ready, "
+                           "got invalid message in queue: %r", msg)
+            continue
+        wid = msg[1]
+        logger.info("Registered Regular Worker with id=%d", wid)
+        workers[wid] = dict()
+
+    logger.info("All workers are ready.""")
+    orch_workers_ready.set()
+    tsl = 0
+    while workers:
+        msg = workers_feedback.get()
+        logger.debug("Got message in queue: %r", msg)
+        mtype, wid = msg[:2]
+        if wid not in workers:
+            logger.warning(
+                "Got and ignored message about unknown worker id %d. ", wid)
+            continue
+        if mtype == WORKER_TIMESLICE_START:
+            workers[wid]['timeslice_status'] = 'running'
+            logger.info("Timeslice start for worker id=%d", wid)
+            if all(w.get('timeslice_status') == 'running'
+                   for w in workers.values()):
+                logger.info("Timeslice started for all workers, preparing "
+                            "end event")
+                orch_timeslice_finished.clear()
+                logger.info("Sending global timeslice start event")
+                orch_timeslice_started.set()
+        elif mtype == WORKER_TIMESLICE_DONE:
+            workers[wid]['timeslice_status'] = 'done'
+            logger.info("Timeslice done for worker id=%d", wid)
+            if all(w.get('timeslice_status') == 'done'
+                   for w in workers.values()):
+                tsl += 1
+                logger.info("Timeslice %d done for all workers, preparing "
+                            "start event", tsl)
+                orch_timeslice_started.clear()
+                logger.info("Sending global timeslice finished event")
+                orch_timeslice_finished.set()
+        elif mtype == WORKER_FINISHED:
+            logger.info("Worker id=%d has done all timeslices. "
+                        "Stop tracking it", wid)
+            del workers[wid]
+    orch_stop_all.set()
+
+
+@contextmanager
+def worker_timeslice(logger, wid):
+    """Context manager to encapsulate work in a timeslice."""
+    logger.info("(id=%d), sending timeslice start message", wid)
+    workers_feedback.put((WORKER_TIMESLICE_START, wid))
+    # wait for orchestrator to acknowledge start on all workers
+    # so that we are sure that at the end we won't wait for previous
+    # timeslice end event
+    orch_timeslice_started.wait()
+    yield
+
+    logger.info("(id=%d), sending timeslice done message", wid)
+    workers_feedback.put((WORKER_TIMESLICE_DONE, wid))
+
+    logger.info("(id=%d), waiting for global end of timeslice", wid)
+    orch_timeslice_finished.wait()
+
+    logger.info("(id=%d), timeslice globally finished", wid)
+
+
 def regular_worker():
+    logger = logging.getLogger(__name__ + '.regular_worker')
     registry = start_registry(DEFAULT_ISOLATION)
     if registry is None:
-        logging.critical("regular_worker: couldn't init registry")
+        logger.critical("Couldn't init registry")
         sys.exit(1)
 
     Worker = registry.Wms.Worker.Regular
@@ -72,22 +182,34 @@ def regular_worker():
         done_timeslice=previous_run_timeslice,
         max_timeslice=previous_run_timeslice + timeslices,
         )
+    wid = process.id
+    registry.commit()
+    workers_feedback.put((REGULAR_READY, wid))
+
+    logger.info("(id=%d), waiting for orchestrator "
+                "to register all workers.",  wid)
+    orch_workers_ready.wait()
 
     with_profile = Configuration.get('with_profile')
 
     if with_profile:
         profile = Profile()
         profile.enable()
-    for i in range(1, 1 + timeslices):
-        registry.commit()
+    for i in range(timeslices):
         try:
-            process.run_timeslice()
+            with worker_timeslice(logger, wid):
+                process.run_timeslice()
+        except Exception:
+            logger.exception("Uncatched exception in main loop")
         except KeyboardInterrupt:
             process.stop()
             break
-        process.wait_others(i)
     registry.commit()
+    logger.warn("(id=%d), all timeslices done. Starting end sequence", wid)
+    process.stop()
+    workers_feedback.put((WORKER_FINISHED, wid))
     if with_profile:
+        logger.info("Producing profiling statistics")
         profile.disable()
         dump_profile(profile, Configuration.get('profile_file'))
 
@@ -113,12 +235,24 @@ def continuous(wtype,
         Worker.query().delete()
         registry.commit()
 
-    process = Worker.insert(pid=os.getpid())
+    pid = os.getpid()
+    process = Worker.insert(pid=pid)
     registry.commit()
-    while not process.should_proceed():
-        logger.info("Regular workers not yet running. Waiting a bit")
-        time.sleep(0.1)
-        registry.rollback()
+
+    # as the continuous workers uses the status of the regular workers to
+    # know when to stop, it has to wait for them to be ready before actually
+    # starting
+    logger.info("Waiting for the regular workers to be ready.")
+    orch_workers_ready.wait()
+
+    def should_proceed():
+        if not orch_stop_all.is_set():
+            return True
+        logger.info("%s(pid=%d) got the stop_all signal from orchestrator",
+                    wtype, pid)
+
+    process.should_proceed = should_proceed
+
     with_profile = Configuration.get('with_profile')
     if with_profile:
         profile = Profile()
@@ -151,13 +285,9 @@ def run():
 
     # starting regular workers right away, otherwise continuous workers
     # would believe the test/bench run is already finished.
-    for process in (Process(target=regular_worker, args=())
-                    for i in range(regular)):
-        process.start()
-
-    Process(target=reserver, args=()).start()
-
-    planners = [Process(target=planner, args=(i, ))
-                for i in range(planners)]
-    for process in planners:
+    processes = [Process(target=orchestrator), Process(target=reserver)]
+    processes.extend(Process(target=regular_worker) for i in range(regular))
+    processes.extend(Process(target=planner, args=(i, ))
+                     for i in range(planners))
+    for process in processes:
         process.start()
