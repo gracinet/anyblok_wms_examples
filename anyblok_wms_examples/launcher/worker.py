@@ -12,6 +12,10 @@ import random
 import os
 import logging
 import select
+
+from sqlalchemy.exc import OperationalError
+from psycopg2.extensions import TransactionRollbackError
+
 from anyblok import Declarations
 from anyblok.column import Integer
 from anyblok.column import Boolean
@@ -43,6 +47,8 @@ class WmsExamplesContinuousWorker:
     max_sleep = 1
     """Maximal time to sleep."""
 
+    conflicts = 0
+
     def __repr__(self):
         return "%s(pid=%d)" % (self.__registry_name__, self.pid)
 
@@ -51,6 +57,10 @@ class WmsExamplesContinuousWorker:
         """Return ``False`` iff all regular workers are finished."""
         Regular = cls.registry.Wms.Worker.Regular
         count = Regular.query().filter(Regular.active.is_(True)).count()
+        # if another locking txn commits after this first request that
+        # inits the mvcc but before our attempts to lock, we'll get a
+        # serialization error, because the other txn has released its locks.
+        cls.registry.commit()
         if count:
             logger.debug("%s: There are still %d active regular workers. "
                          "Proceeding further", cls.__registry_name__, count)
@@ -69,26 +79,43 @@ class WmsExamplesContinuousWorker:
             logger.info("%s: nothing to be done at the moment; "
                         "sleeping for %.3f seconds", prefix, sleep)
             time.sleep(sleep)
+            # start a new txn, in order to avoid artificially long ones
+            self.registry.commit()
+            logger.info("%s: waking up", prefix)
 
     def run(self):
         self_str = str(self)  # can't be done after an error
         while self.should_proceed():
             try:
                 # TODO make a bunch instead ?
-                something_done = self.process_one()
+                something_done = self.process_one(self_str=self_str)
+                self.registry.commit()
             except KeyboardInterrupt:
                 self.registry.rollback()
                 logger.warning("%s: got keyboard interrupt, quitting",
                                self_str)
                 return
+            except OperationalError as exc:
+                if isinstance(exc.orig, TransactionRollbackError):
+                    self.conflicts += 1
+                    logger.warning("%s: got conflict: %s", self_str, exc)
+                else:
+                    logger.exception("%s: catched exception in main loop",
+                                     self_str)
+                self.registry.rollback()
             except:
                 logger.exception("%s: got exception in main loop", self_str)
                 self.registry.rollback()
             else:
-                self.registry.commit()
-                self.maybe_sleep(self_str, something_done)
-        logger.info("%s: No more active regular worker. Stopping there.",
-                    self_str)
+                try:
+                    self.maybe_sleep(self_str, something_done)
+                except KeyboardInterrupt:
+                    logger.warning("%s: got keyboard interrupt, quitting",
+                                   self_str)
+                    return
+        logger.info("%s: No more active regular worker. Stopping there. "
+                    "Total number of conflicts: %d",
+                    self_str, self.conflicts)
 
 
 @register(Wms)
@@ -109,7 +136,7 @@ class Planner(Mixin.WmsExamplesContinuousWorker):
 @register(Wms.Worker)
 class Reserver(Mixin.WmsExamplesContinuousWorker):
 
-    def process_one(self):
+    def process_one(self, self_str=None):
         """Try and perform a reservation.
 
         To be refined in concrete subclasses
@@ -137,6 +164,9 @@ class Regular:
     other = set()
 
     simulate_sleep = 10
+
+    conflicts = 0
+    """Used to report number of database conflicts."""
 
     def process_one(self):
         """To be implemented by concrete subclasses.
@@ -173,13 +203,29 @@ class Regular:
         self.begin_timeslice()
         logger.info("%s, begin sequence for timeslice %d finished, now "
                     "proceeding to normal work", self, tsl)
+        # it's important to start with a fresh MVCC snapshot
+        # no matter what (especially requests due to logging)
+        self.registry.commit()
         proceed = True
         while proceed:
             try:
-                proceed = self.process_one() is not None
+                op = self.process_one()
                 self.registry.commit()
+                if op is None:
+                    proceed = False
+                elif op is not True:
+                    logger.info("%s, %s(id=%d) done and committed",
+                                self_str, op[0], op[1])
             except KeyboardInterrupt:
                 raise
+            except OperationalError as exc:
+                if isinstance(exc.orig, TransactionRollbackError):
+                    self.conflicts += 1
+                    logger.warning("%s, got conflict: %s", self_str, exc)
+                else:
+                    logger.exception("%s, catched exception in main loop",
+                                     self_str)
+                self.registry.rollback()
             except:
                 self.registry.rollback()
                 logger.exception("%s, exception in process_one()", self_str)
@@ -188,7 +234,9 @@ class Regular:
         if tsl == self.max_timeslice:
             self.active = False
         self.registry.commit()
-        logger.info("%s, finished timeslice %d", self_str, tsl)
+        logger.info("%s, finished timeslice %d. "
+                    "Cumulated number of conflicts: %d", self_str, tsl,
+                    self.conflicts)
         sys.stderr.flush()
         self.registry.session.execute("NOTIFY timeslice_finished, '%d'" % tsl)
         self.registry.commit()

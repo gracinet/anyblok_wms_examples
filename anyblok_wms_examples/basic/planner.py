@@ -34,7 +34,7 @@ class Planner(Mixin.WmsBasicSellerUtil):
             Reservation.request_item).filter(RequestItem.request == req).all()
         return req, resas
 
-    def process_one(self):
+    def process_one(self, self_str=None):
         Reservation = self.registry.Wms.Reservation
         Request = Reservation.Request
         with Request.claim_reservations(planned=False) as req_id:
@@ -42,6 +42,8 @@ class Planner(Mixin.WmsBasicSellerUtil):
                 return False
             req, resas = self.unfold_request(req_id)
             purpose = req.purpose
+            logger.info("%s, claimed reservation id=%d (purpose=%r)",
+                        self_str, req_id, purpose)
             if purpose == 'unpack':
                 self.plan_unpack(resas)
             elif isinstance(purpose, list) and purpose[0] == 'sale':

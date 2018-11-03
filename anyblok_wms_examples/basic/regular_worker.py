@@ -74,6 +74,10 @@ class Regular(Mixin.WmsBasicSellerUtil):
         pack_type = GoodsType.query().filter(
             GoodsType.code.in_(pack_codes)).with_for_update(
                 skip_locked=True).first()
+        if pack_type is None:
+            logger.info("No product missing that isn't taken care of by "
+                        "other processes")
+            return
 
         Operation = Wms.Operation
         logger.info("Product whose pack is %r is missing, ordering some",
@@ -160,30 +164,67 @@ class Regular(Mixin.WmsBasicSellerUtil):
         logger.info("%s, done issuing client sales", self_str)
         self.registry.commit()
 
+    def planned_op_lock_query(self):
+        # this caching helps speeding things up between
+        # transaction begin and lock querying, hence reducing conflicts
+        # (the MVCC snapshot is supposed to be taken at first query,
+        #  but I still can see a few)
+        query = getattr(self, '_planned_lock_query', None)
+        if query is not None:
+            return query
+        logger.warning("Lock query not found in cache")
+        Operation = self.registry.Wms.Operation
+        query = Operation.query(Operation.id).filter(
+            Operation.type != 'wms_arrival',
+            Operation.state == 'planned').order_by(
+                Operation.dt_execution).with_for_update(
+                    key_share=True,
+                    skip_locked=True)
+        self._planned_lock_query = query
+        return query
+
+    def select_ready_operation(self):
+        """Find an operation ready to be processed (and lock it)
+
+        :return: the operation or None and boolean telling if no operation was
+                 found if that's definitive
+        """
+        Operation = self.registry.Wms.Operation
+        # starting with a fresh MVCC snapshot
+        self.registry.commit()
+        planned_id = self.planned_op_lock_query().first()
+        if planned_id is None:
+            return None, True
+        planned = Operation.query().get(planned_id)
+        previous_planned = True
+        while previous_planned:
+            previous_planned = [
+                op.id for op in planned.follows if op.state == 'planned']
+            if not previous_planned:
+                break
+            planned = Operation.query().filter(
+                Operation.id.in_(previous_planned)).with_for_update(
+                    key_share=True,
+                    skip_locked=True).first()
+            if planned is None:
+                return None, False
+        return planned, None
+
     def process_one(self):
         """Find any Operation that can be done, and execute it."""
-        Operation = self.registry.Wms.Operation
-        HI = Operation.HistoryInput
-        Avatar = self.registry.Wms.Goods.Avatar
+        # first alternative: climbing up planned operations, without
+        # complicated outer join to avatars that are conflict sources
+        # for PG
+        op, stop = self.select_ready_operation()
+        if op is None:
+            if stop:
+                return
+            else:
+                return True
 
-        # history/input lines with avatars not in present state
-        # TODO UPSTREAM generic query for 'ready' operations.
-        subq = HI.query(HI.avatar_id, HI.operation_id).join(
-            Avatar, HI.avatar_id == Avatar.id).filter(
-                Avatar.state.in_(('future', 'past'))).subquery()
-
-        query = Operation.query().outerjoin(
-            subq, subq.c.operation_id == Operation.id).filter(
-                subq.c.avatar_id.is_(None),
-                Operation.type != 'wms_arrival',
-                Operation.state == 'planned').order_by(
-                    Operation.id).with_for_update(
-                    of=Operation,
-                    skip_locked=True)
-
-        op = query.first()
-        if op is not None:
-            logger.info("Found op ready to be executed: %r, doing it now.",
-                        op)
-            op.execute()
-        return op
+        logger.info("%s, found op ready to be executed: %r, doing it now.",
+                    self, op)
+        op.execute()
+        # returning op info instead of instance to avoid any
+        # after-commit query
+        return op.__registry_name__, op.id
