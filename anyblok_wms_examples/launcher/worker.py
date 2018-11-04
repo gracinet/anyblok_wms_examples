@@ -188,7 +188,8 @@ class Regular:
         return done + 1
 
     def __str__(self):
-        return "Regular Worker (id=%d, pid=%d)" % (self.id, self.pid)
+        # in tests, id and pid can be None, hence let's avoid %d
+        return "Regular Worker (id=%s, pid=%s)" % (self.id, self.pid)
 
     def stop(self):
         self.registry.rollback()
