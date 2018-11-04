@@ -7,12 +7,13 @@
 # v. 2.0. If a copy of the MPL was not distributed with this file,You can
 # obtain one at http://mozilla.org/MPL/2.0/.
 from anyblok.blok import Blok
+from .. import version
 
 
 class Seller(Blok):
     """A very crude scenario of arrivals and departures."""
 
-    version = '0.0.1'
+    version = version
     author = 'Georges Racinet'
 
     required = ['wms-core', 'wms-reservation', 'wms-example-launcher']

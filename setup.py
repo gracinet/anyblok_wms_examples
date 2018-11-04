@@ -8,9 +8,7 @@
 # obtain one at http://mozilla.org/MPL/2.0/.
 from setuptools import setup, find_packages
 import os
-
-version = '0.0.1'
-
+from anyblok_wms_examples import version
 
 here = os.path.abspath(os.path.dirname(__file__))
 

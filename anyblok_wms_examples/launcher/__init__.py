@@ -7,12 +7,13 @@
 # v. 2.0. If a copy of the MPL was not distributed with this file,You can
 # obtain one at http://mozilla.org/MPL/2.0/.
 from anyblok.blok import Blok
+from .. import version
 
 
 class Launcher(Blok):
     """Blok bringing in support for launcher scripts
     """
-    version = '0.0.1'
+    version = version
     author = "Georges Racinet"
 
     @classmethod
