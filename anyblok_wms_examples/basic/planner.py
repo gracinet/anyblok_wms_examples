@@ -53,11 +53,12 @@ class Planner(Mixin.WmsBasicSellerUtil):
 
     def plan_unpack(self, resas):
         Wms = self.registry.Wms
-        Goods = Wms.Goods
+        Avatar = Wms.PhysObj.Avatar
         Operation = Wms.Operation
         for resa in resas:
-            avatar = Goods.Avatar.query().filter_by(goods=resa.goods,
-                                                    dt_until=None).one()
+            # TODO use eventual_avatar()
+            avatar = Avatar.query().filter_by(obj=resa.physobj,
+                                              dt_until=None).one()
             dt = datetime.now() + timedelta(minutes=10)
             move = Operation.Move.create(input=avatar,
                                          dt_execution=dt,
@@ -70,11 +71,12 @@ class Planner(Mixin.WmsBasicSellerUtil):
 
     def plan_delivery(self, resas, sale_id):
         Wms = self.registry.Wms
-        Goods = Wms.Goods
+        Avatar = Wms.PhysObj.Avatar
         Operation = Wms.Operation
         for resa in resas:
-            avatar = Goods.Avatar.query().filter_by(goods=resa.goods,
-                                                    dt_until=None).one()
+            # TODO use eventual_avatar()
+            avatar = Avatar.query().filter_by(goods=resa.goods,
+                                              dt_until=None).one()
             dt = datetime.now() + timedelta(minutes=10)
             move = Operation.Move.create(input=avatar,
                                          dt_execution=dt,

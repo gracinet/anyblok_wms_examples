@@ -63,7 +63,7 @@ class PlannerTestCase(WmsTestCase):
         self.assertIsNotNone(pack_code)
         product = pack_code[:-4]
 
-        Goods = self.Wms.Goods
+        Goods = self.Wms.PhysObj
         Avatar = Goods.Avatar
 
         if outer:
@@ -73,8 +73,7 @@ class PlannerTestCase(WmsTestCase):
                 _, resas = planner.unfold_request(req_id)
                 planner.plan_unpack(resas)
 
-        Location = self.Wms.Location
-        stock_loc = Location.query().filter_by(code='stock').one()
+        stock_loc = Goods.query().filter_by(code='stock').one()
         # too lazy to think of the join and besides, we could succeed by
         # chance
         unpacked_type = Goods.Type.query().filter_by(code=product).one()
@@ -99,7 +98,7 @@ class PlannerTestCase(WmsTestCase):
         planner = self.Planner.insert()
 
         Sale = self.Wms.Example.Sale
-        Goods = self.Wms.Goods
+        Goods = self.Wms.PhysObj
         product_1 = 'JEANS/25/28'
         product_2 = 'JEANS/31/32'
         sale, req = Sale.create({product_1: 2, product_2: 1})
@@ -108,7 +107,7 @@ class PlannerTestCase(WmsTestCase):
         gt2 = Goods.Type.query().filter_by(code=product_2).one()
 
         # Let's create enough goods in stock
-        stock = self.Wms.Location.query().filter_by(code='stock').one()
+        stock = Goods.query().filter_by(code='stock').one()
         Arrival = self.Wms.Operation.Arrival
         for goods_type in (gt1, gt1, gt2):
             Arrival.create(location=stock,

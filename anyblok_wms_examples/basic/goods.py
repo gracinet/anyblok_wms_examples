@@ -14,7 +14,7 @@ Mixin = Declarations.Model
 register = Declarations.register
 
 
-@register(Model.Wms.Goods)
+@register(Model.Wms.PhysObj)
 class Type:
     product = String(index=True)
     """Common reference shared between deliverable Goods and their packs."""

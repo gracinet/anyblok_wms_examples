@@ -20,22 +20,27 @@ class Seller(Blok):
 
     def install(self):
         Wms = self.registry.Wms
-        Location = Wms.Location
-        for loc in ('incoming', 'stock', 'outgoing'):
-            Location.insert(code=loc)
+        POT = Wms.PhysObj.Type
+        Apparition = Wms.Operation.Apparition
+        loc_type = POT.insert(code="LOCATION",
+                              behaviours=dict(container=True))
+        # we'll use a root container for the sake of example
+        root = Wms.create_root_container(loc_type, code="warehouse")
+        for loc_code in ('incoming', 'stock', 'outgoing'):
+            Apparition.create(state='done', location=root, quantity=1,
+                              goods_type=loc_type, goods_code=loc_code)
 
-        Goods = Wms.Goods
         for width in range(25, 45):
             for height in range(20, 40):
                 product = "JEANS/%d/%d" % (width, height)
-                jeans = Goods.Type.insert(code=product, product=product)
-                Goods.Type.insert(
+                jeans = POT.insert(code=product, product=product)
+                POT.insert(
                     code=product + '/PCK',
                     product=product,
                     behaviours=dict(
                         unpack=dict(
                             uniform_outcomes=True,
-                            outcomes=[dict(type=jeans.id, quantity=20)]
+                            outcomes=[dict(type=jeans.code, quantity=20)]
                         )
                     )
                 )

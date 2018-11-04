@@ -14,13 +14,15 @@ class RegularWorkerTestCase(WmsTestCase):
     def setUp(self):
         super().setUp()
         Wms = self.Wms = self.registry.Wms
+        self.assertEqual(self.Wms.Reservation.query().count(), 0)
         self.Worker = Wms.Worker.Regular
-        self.Goods = Wms.Goods
+        self.PhysObj = Wms.PhysObj
         self.Operation = Wms.Operation
         self.Arrival = Wms.Operation.Arrival
 
     def gt_by_code(self, code):
-        return self.single_result(self.Goods.Type.query().filter_by(code=code))
+        return self.single_result(self.PhysObj.Type.query().filter_by(
+            code=code))
 
     def test_missing_product(self):
         # to avoid pollution, we restrict the query to just one product
@@ -48,11 +50,10 @@ class RegularWorkerTestCase(WmsTestCase):
         pack_code = worker.purchase()
 
         self.assertIsNotNone(pack_code)
-
         resa = self.single_result(self.Wms.Reservation.query())
         request = resa.request_item.request
         self.assertEqual(request.purpose, "unpack")
-        self.assertEqual(resa.goods.type.code, pack_code)
+        self.assertEqual(resa.physobj.type.code, pack_code)
 
         Arrival = self.Wms.Operation.Arrival
         arrival = self.single_result(Arrival.query())
@@ -62,7 +63,7 @@ class RegularWorkerTestCase(WmsTestCase):
     def test_purchase_not_needed(self):
         worker = self.Worker()
         worker.missing_product_query = lambda: (
-            "SELECT product FROM wms_goods_type WHERE id=id+1")
+            "SELECT product FROM wms_physobj_type WHERE id=id+1")
         self.assertFalse(worker.purchase())
 
     def test_process_arrival(self):
@@ -72,9 +73,12 @@ class RegularWorkerTestCase(WmsTestCase):
         worker.done_timeslice += 2
         self.assertTrue(worker.process_arrival())
 
-        Avatar = self.Wms.Goods.Avatar
-        avatar = self.single_result(Avatar.query().filter_by(state='present'))
-        self.assertEqual(avatar.goods.type.code, pack_code)
+        PhysObj = self.Wms.PhysObj
+        Avatar = PhysObj.Avatar
+        phobj = self.single_result(PhysObj.query().join(PhysObj.type).filter(
+            PhysObj.Type.code == pack_code))
+        avatar = self.single_result(Avatar.query().filter_by(state='present',
+                                                             obj=phobj))
         self.assertEqual(avatar.location.code, 'incoming')
 
         # no more to be done
@@ -91,8 +95,14 @@ class RegularWorkerTestCase(WmsTestCase):
         for arrival in Operation.Arrival.query().all():
             arrival.execute()
 
-        self.assertIsInstance(regular.process_one(), Operation.Move)
-        unpack_op = regular.process_one()
-        self.assertIsInstance(unpack_op, Operation.Unpack)
+        orig_commit = regular.registry.commit
+        regular.registry.commit = lambda: None
+        try:
+            self.assertEqual(regular.process_one()[0], 'Model.Wms.Operation.Move')
+            unpack_info = regular.process_one()
+        finally:
+            regular.registry.commit = orig_commit
+        self.assertEqual(unpack_info[0], 'Model.Wms.Operation.Unpack')
+        unpack_op = Operation.query().get(unpack_info[1])
         for av in unpack_op.outcomes:
             self.assertEqual(av.state, 'present')

@@ -27,28 +27,29 @@ class Regular(Mixin.WmsBasicSellerUtil):
         """A query for product that's entirely missing.
 
         For now, a pure SQL query, to be converted into proper SQLAlchemy
-        later. Probably also needs to be optimized.
+        later. It is probably more efficient than using the quantity queries
+        because the DISTINCT ON avoids fetching all matching avatars.
 
         since we only have incoming and stock locations, all of them
         hold potentially sellable product.
         """
         return """
-            SELECT product FROM (
-               SELECT goods_type.product, SUM(COALESCE(count, 0)) AS level
-               FROM wms_goods_type goods_type
-               LEFT JOIN (
-                  SELECT type_id, count(*)
-                  FROM wms_goods goods,
-                       wms_goods_avatar avatar
-                  WHERE avatar.state IN ('present', 'future')
-                  AND avatar.dt_until IS NULL
-                  AND avatar.goods_id = goods.id
-                  GROUP BY goods.type_id
-                  ) AS per_type
-               ON per_type.type_id = goods_type.id
-               GROUP BY goods_type.product
-               ) AS per_product
-            WHERE level = 0
+        SELECT product FROM (
+          SELECT pot2.product,
+                 bool_or(COALESCE(has_avatar.has, FALSE)) AS has_some
+          FROM wms_physobj_type pot2
+          LEFT JOIN (
+            SELECT DISTINCT ON (pot.id) pot.id, TRUE AS has
+            FROM wms_physobj_type pot
+            JOIN wms_physobj po ON pot.id = po.type_id
+            JOIN wms_physobj_avatar av ON av.obj_id=po.id
+            WHERE av.state IN ('present', 'future')
+            AND av.dt_until IS NULL
+          ) AS has_avatar
+          ON has_avatar.id = pot2.id
+          GROUP BY pot2.product
+        ) AS by_product
+        WHERE has_some IS FALSE
         """.strip()
 
     def purchase(self):
@@ -70,7 +71,7 @@ class Regular(Mixin.WmsBasicSellerUtil):
         pack_codes = [r[0] + '/PCK' for r in products]
 
         Wms = self.registry.Wms
-        GoodsType = Wms.Goods.Type
+        GoodsType = Wms.PhysObj.Type
         pack_type = GoodsType.query().filter(
             GoodsType.code.in_(pack_codes)).with_for_update(
                 skip_locked=True).first()
@@ -192,6 +193,10 @@ class Regular(Mixin.WmsBasicSellerUtil):
         Operation = self.registry.Wms.Operation
         # starting with a fresh MVCC snapshot
         self.registry.commit()
+        # TODO this is too complicated: locking an op then climbing along
+        # the 'follows' relation to find an executable one.
+        # it'd be much simpler to look for an Operation whose inputs are
+        # all present.
         planned_id = self.planned_op_lock_query().first()
         if planned_id is None:
             return None, True

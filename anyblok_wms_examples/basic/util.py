@@ -17,8 +17,7 @@ class WmsBasicSellerUtil:
     # I'm actually tempted to set in on the Blok itself !
 
     def location_by_code(self, code):
-        # TODO upstream ?
-        return self.registry.Wms.Location.query().filter_by(code=code).one()
+        return self.registry.Wms.PhysObj.query().filter_by(code=code).one()
 
     @property
     def incoming_location(self):

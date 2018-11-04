@@ -28,7 +28,7 @@ class Sale:
         Wms = cls.registry.Wms
         Reservation = Wms.Reservation
         RequestItem = Reservation.RequestItem
-        GoodsType = Wms.Goods.Type
+        GoodsType = Wms.PhysObj.Type
 
         req = Reservation.Request.insert(purpose=['sale', sale.id])
         for product, qty in contents.items():
